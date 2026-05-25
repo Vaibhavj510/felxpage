@@ -24,6 +24,10 @@ const TEMPLATES = [
 
 const BLOCKED = ["admin","api","dashboard","login","signup","settings","help","support","about","terms","privacy","billing","upgrade","create"];
 
+const MAX_PHOTOS: Record<string, number> = {
+  free: 3, pro: 10, premium: 20, custom: 999
+};
+
 const inputStyle: React.CSSProperties = {
   width: "100%", padding: "14px 16px", background: "#0a0a0a",
   border: "1px solid #2a2a2a", borderRadius: 12, fontSize: 14,
@@ -70,6 +74,7 @@ export default function CreatePage() {
   const [step, setStep] = useState(1);
   const [session, setSession] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [existingCount, setExistingCount] = useState(0);
   const [form, setForm] = useState({
     pageType: "", username: "", templateId: "", data: {} as Record<string, any>,
   });
@@ -78,24 +83,29 @@ useEffect(() => {
     const checkSession = async () => {
       try {
         const { data: { session } } = await supabase.auth.getSession()
-        console.log("Create page session check:", session ? "found" : "not found")
-        
-        if (session) {
-          setSession(session)
-          setLoading(false)
-          return
-        }
 
-        const { data: { user } } = await supabase.auth.getUser()
-        console.log("Create page user check:", user ? "found" : "not found")
-
-        if (user) {
+        if (!session) {
+          const { data: { user } } = await supabase.auth.getUser()
+          if (!user) { router.push("/"); return }
           setSession({ user })
-          setLoading(false)
-          return
+        } else {
+          setSession(session)
         }
 
-        router.push("/")
+        // Check if user already has profiles
+        const userId = session?.user?.id || (await supabase.auth.getUser()).data.user?.id
+        if (userId) {
+          const { data: existingProfiles } = await supabase
+            .from("profiles")
+            .select("id, username")
+            .eq("user_id", userId)
+
+          // If user has profiles and is on free plan
+          // still allow create but show existing count
+          setExistingCount(existingProfiles?.length || 0)
+        }
+
+        setLoading(false)
       } catch (err) {
         console.error("Session check error:", err)
         router.push("/")
@@ -122,7 +132,7 @@ useEffect(() => {
           FlexPage
         </a>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 32 }}>
-          {[1,2,3,4,5].map((s) => (
+          {[1,2,3,4,5,6].map((s) => (
             <div key={s} style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <div style={{
                 width: 28, height: 28, borderRadius: "50%", display: "flex",
@@ -135,10 +145,27 @@ useEffect(() => {
               {s < 5 && <div style={{ width: 32, height: 1, background: step > s ? "rgba(249,115,22,0.3)" : "#1c1c1c" }} />}
             </div>
           ))}
-          <span style={{ fontSize: 12, color: "#52525b", marginLeft: 12 }}>Step {step} of 5</span>
-        </div>
+      <span style={{ fontSize: 12, color: "#52525b", marginLeft: 12 }}>Step {step} of 6</span>        </div>
       </div>
-
+        {existingCount > 0 && (
+          <div style={{
+            padding: "12px 16px",
+            background: "rgba(249,115,22,0.08)",
+            border: "1px solid rgba(249,115,22,0.2)",
+            borderRadius: 10,
+            fontSize: 13,
+            color: "#f97316",
+            marginBottom: 24,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}>
+            <span>You have {existingCount} existing page{existingCount > 1 ? "s" : ""}. Free plan allows 1 page.</span>
+            <a href="/dashboard" style={{ color: "#f97316", fontWeight: 700, textDecoration: "none" }}>
+              Go to dashboard →
+            </a>
+          </div>
+        )}
       <div style={{ maxWidth: 800, margin: "0 auto" }}>
 
         {/* STEP 1 — Page Type */}
@@ -302,14 +329,23 @@ useEffect(() => {
             </div>
             <div style={{ display: "flex", gap: 12 }}>
               <button onClick={() => setStep(3)} style={backBtnStyle}>Back</button>
-              <button onClick={() => setStep(5)} style={nextBtnStyle(true)}>Preview my page →</button>
+              <button onClick={() => setStep(5)} style={nextBtnStyle(true)}>Add photos →</button>
             </div>
           </div>
         )}
 
-        {/* STEP 5 — Publish */}
+        {/* STEP 5 — Photos */}
         {step === 5 && (
-          <PublishStep form={form} session={session} onBack={() => setStep(4)} />
+          <PhotoStep
+            session={session}
+            onNext={() => setStep(6)}
+            onBack={() => setStep(4)}
+          />
+        )}
+
+        {/* STEP 6 — Publish */}
+        {step === 6 && (
+          <PublishStep form={form} session={session} onBack={() => setStep(5)} />
         )}
 
       </div>
@@ -443,3 +479,174 @@ function PublishStep({ form, session, onBack }: { form: any; session: any; onBac
     </div>
   );
 }
+  function PhotoStep({ session, onNext, onBack }: {
+  session: any;
+  onNext: () => void;
+  onBack: () => void;
+}) {
+  const [photos, setPhotos] = useState<{ key: string; url: string }[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+
+    if (photos.length + files.length > 3) {
+      setError("Free tier allows maximum 3 photos.");
+      return;
+    }
+
+    setUploading(true);
+    setError("");
+
+    for (const file of files) {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("userId", session.user.id);
+
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await res.json();
+
+      if (data.error) {
+        setError(data.error);
+        break;
+      }
+
+      const url = URL.createObjectURL(file);
+      setPhotos((prev) => [...prev, { key: data.key, url }]);
+    }
+
+    setUploading(false);
+  }
+
+  return (
+    <div>
+      <h1 style={headingStyle}>Add your<br />photos</h1>
+      <p style={subStyle}>
+        Upload up to 3 photos. Your first photo will be your profile picture.
+        You can add more after publishing.
+      </p>
+
+      {/* Upload area */}
+      <div
+        style={{
+          background: "#141414",
+          border: "2px dashed #2a2a2a",
+          borderRadius: 20,
+          padding: "clamp(24px, 4vw, 48px)",
+          textAlign: "center",
+          marginBottom: 24,
+          cursor: "pointer",
+          transition: "border-color 0.2s",
+        }}
+        onClick={() => document.getElementById("photo-upload")?.click()}
+      >
+        <div style={{ fontSize: 40, marginBottom: 12 }}>📸</div>
+        <div style={{ fontSize: 15, fontWeight: 600, color: "#f4f4f5", marginBottom: 6 }}>
+          {uploading ? "Uploading..." : "Click to upload photos"}
+        </div>
+        <div style={{ fontSize: 13, color: "#52525b" }}>
+          JPG, PNG up to 5MB each · Max 3 photos on free plan
+        </div>
+        <input
+          id="photo-upload"
+          type="file"
+          accept="image/*"
+          multiple
+          onChange={handleUpload}
+          style={{ display: "none" }}
+        />
+      </div>
+
+      {/* Photo previews */}
+      {photos.length > 0 && (
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))",
+          gap: 12,
+          marginBottom: 24,
+        }}>
+          {photos.map((photo, i) => (
+            <div key={photo.key} style={{ position: "relative" }}>
+              <div style={{
+                borderRadius: 12,
+                overflow: "hidden",
+                aspectRatio: "1",
+                background: "#141414",
+              }}>
+                <img
+                  src={photo.url}
+                  alt=""
+                  style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                />
+              </div>
+              {i === 0 && (
+                <div style={{
+                  position: "absolute",
+                  bottom: 8,
+                  left: 8,
+                  fontSize: 10,
+                  fontWeight: 700,
+                  padding: "3px 8px",
+                  borderRadius: 100,
+                  background: "#f97316",
+                  color: "#000",
+                }}>
+                  Profile photo
+                </div>
+              )}
+              <button
+                onClick={() => setPhotos((prev) => prev.filter((_, j) => j !== i))}
+                style={{
+                  position: "absolute",
+                  top: 8,
+                  right: 8,
+                  width: 24,
+                  height: 24,
+                  borderRadius: "50%",
+                  background: "rgba(0,0,0,0.7)",
+                  border: "none",
+                  color: "#fff",
+                  fontSize: 12,
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {error && (
+        <div style={{
+          padding: "12px 16px",
+          background: "rgba(239,68,68,0.08)",
+          border: "1px solid rgba(239,68,68,0.2)",
+          borderRadius: 10,
+          color: "#ef4444",
+          fontSize: 13,
+          marginBottom: 20,
+        }}>
+          {error}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 12 }}>
+        <button onClick={onBack} style={backBtnStyle}>Back</button>
+        <button onClick={onNext} style={nextBtnStyle(true)}>
+          {photos.length === 0 ? "Skip for now →" : "Continue →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
